@@ -1,0 +1,45 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Datasets and large TSV/CSV data files (Do not push to Git!)
+dataset/
+student_resource/dataset/
+*.tsv
+*.csv
+*.parquet
+*.jsonl
+*.zip
+*.tar.gz
+*.gz
+
+# Model checkpoints and weights
+*.pt
+*.pth
+*.bin
+*.onnx
+models/
+checkpoints/
+
+# Challenge outputs
+output/
+student_resource/output/
+*.sub
+
+# OS and Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
