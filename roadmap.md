@@ -4,159 +4,157 @@
 * **Objective:** Map Source 1 (`S1`) business entities to duplicate records in Source 2 (`S2`) and Source 3 (`S3`).
 * **Scale:** ~2.2M train records, ~1.73M test reference entities evaluated against ~10M secondary records (~11.7M records total).
 * **Metric:** Macro-averaged $F_{0.5}$ score (precision-weighted, singletons scored as 1.0 if empty, 0.0 if false positive).
-* **Execution Strategy:** Fast local prototyping & verification + JarvisLabs cloud GPU for full-scale vector indexing and inference.
+* **Execution Strategy:** Progressive benchmarking (Local 50k $\to$ 200k) followed by JarvisLabs cloud execution on the full dataset.
 
 ---
 
 ```
                        END-TO-END PIPELINE ARCHITECTURE
  ┌─────────────────┐       ┌──────────────────────┐       ┌──────────────────────┐
- │ Raw Input Data  │ ────> │  Data Normalization  │ ────> │ Candidate Generation │
- │ (S1, S2, S3)    │       │  & Text Cleaning     │       │ (4-Pass Hybrid Block)│
+ │ Raw Input Data  │ ────> │ Multi-View Normalize │ ────> │ 5-Pass Sharded Block │
+ │ (S1, S2, S3)    │       │ (raw, core, numbers) │       │ (Empirical Top-K)    │
  └─────────────────┘       └──────────────────────┘       └──────────┬───────────┘
                                                                      │
- ┌─────────────────┐       ┌──────────────────────┐                  │ Candidate Set
- │ Final Outputs   │ <──── │ Joint 2D Calibrator  │ <──── ┌──────────┴───────────┐
- │ & Submissions   │       │ (τ_sing, τ_match)    │       │ Pairwise Scorer &    │
- └─────────────────┘       └──────────────────────┘       │ LightGBM (w/ Ranks)  │
+ ┌─────────────────┐       ┌──────────────────────┐                  │ Candidate Pool
+ │ Final Outputs   │ <──── │ Per-S1 Decision &    │ <──── ┌──────────┴───────────┐
+ │ & Submissions   │       │ Ambiguity Filter     │       │ LightGBM Classifier  │
+ └─────────────────┘       └──────────────────────┘       │ + Rank & Cross Feats │
                                                           └──────────────────────┘
 ```
 
 ---
 
-## Phase 0: De-Risking Baseline (Fail-Safe First)
-> **Goal:** Build and validate a minimal end-to-end pipeline before investing in model sophistication, guaranteeing that submission mechanics and format checks work 100%.
+## Phase 0: Data Sanity, Country Validation & Baseline Pipeline
+> **Goal:** Verify data integrity, test the empirical country matching assumption, and build a minimal working submission that passes the official validator.
 
-- [ ] **0.1 Minimal Rule-Based Pipeline**
-  - Implement a fast single-pass blocker (exact name match or first 3 words) on a tiny slice.
-  - Generate dummy/naive `matching_results.tsv` and `candidate_pairs.tsv`.
-- [ ] **0.2 Run Official Submission Validator**
-  - Execute `student_resource/utils/validate_submission.py`.
-  - Confirm `PASS (exit 0)` locally with zero format errors or warnings.
+- [ ] **0.1 Data Sanity & Cardinality Inspection**
+  - Verify schema, line counts, and missingness across all train and test TSVs.
+  - Measure ground-truth match cardinality distribution (P50, P90, P99).
+  - Calculate true singleton percentage in training set.
+- [ ] **0.2 Empirical Country Matching Check**
+  - Verify whether any true matches cross country boundaries:
+    ```python
+    sum(country_S1 != country_S2_or_S3)
+    ```
+  - If 0, establish country as an absolute hard partition; if > 0, preserve cross-country candidates with a penalty feature.
+- [ ] **0.3 Fail-Safe Baseline Pipeline**
+  - Implement a fast rule-based blocker (exact normalized name) on a small slice.
+  - Generate initial dummy `output/matching_results.tsv` and `output/candidate_pairs.tsv`.
+  - Run `student_resource/utils/validate_submission.py` and confirm `PASS (exit 0)`.
 
 ---
 
-## Phase 1: Local Setup, EDA & Robust Validation Scheme
-> **Goal:** Set up local development, extract a 50k slice, and design a validation harness that simulates the zero-shot "France" test distribution and accurately scores Macro $F_{0.5}$.
+## Phase 1: Multi-View Normalization & Robust Validation Scheme
+> **Goal:** Create rich multi-view text representations without destructive replacement, and establish a cross-country zero-shot validation harness.
 
-- [ ] **1.1 Local Environment Setup**
-  - Set up Python virtual environment (`.venv`).
-  - Install dependencies: `polars`, `duckdb`, `rapidfuzz`, `scikit-learn`, `lightgbm`, `sentence-transformers`, `faiss-cpu`, `tqdm`.
-- [ ] **1.2 Data Slicing for Local Iteration**
-  - Extract a 50,000-record subset from `train_source1.tsv` and corresponding records from S2, S3, and ground truth.
-- [ ] **1.3 Exploratory Data Analysis (EDA) & Noise Profiling**
-  - Analyze noise patterns in names: legal suffixes (`Inc`, `Pvt Ltd`, `SARL`), punctuation, typos, transliterations, word-order flips.
-  - Analyze address structures: abbreviations (`St`, `Rd`), landmark markers ("Near SBI ATM"), PIN/ZIP codes, missing state/city tokens.
-- [ ] **1.4 Group-Aware Validation Split (by `source1_entity_id`)**
-  - Ensure all candidate pairs for any given $S1$ entity remain strictly in train or strictly in validation (no data leakage).
-- [ ] **1.5 Zero-Shot Cross-Country Holdout Experiment**
+- [ ] **1.1 Multi-View Data Normalization**
+  - Extract parallel representations for each record:
+    - Name views: `name_raw`, `name_normalized`, `name_core`, `name_alnum`, `name_tokens_sorted`.
+    - Address views: `address_raw`, `address_normalized`, `address_numbers`, `postal_tokens`.
+- [ ] **1.2 Group-Aware Validation Split (by `source1_entity_id`)**
+  - Maintain a locked validation set split strictly by `source1_entity_id` (prevent candidate leakage).
+- [ ] **1.3 Cross-Country Zero-Shot Holdout Experiment**
   - Train on `US` (+ partial `India`), validate zero-shot on held-out `India` to proxy the test set `France` gap.
-- [ ] **1.6 Offline Macro $F_{0.5}$ Evaluation Harness**
-  - Replicate the exact competition scoring logic including the singleton penalty (empty prediction = 1.0; false positive on singleton = 0.0).
+- [ ] **1.4 Offline Macro $F_{0.5}$ Evaluation Harness**
+  - Replicate official competition scoring with strict singleton mechanics (empty = 1.0; false positive = 0.0).
 
 ---
 
-## Phase 2: Candidate Generation (Blocking) Engine
-> **Goal:** Reduce the search space from $17.3\text{ trillion}$ comparisons to $\le 30$ candidates per entity while maintaining $>98\%$ recall ceiling.
+## Phase 2: 5-Pass Sharded Blocking & Candidate Pool Curve
+> **Goal:** Build diverse, independent blocking passes using sharded inverted postings and empirically optimize the candidate cap.
 
-- [ ] **2.1 Text Normalization Pipeline**
-  - Lowercasing, accent stripping (`NFKD`), whitespace cleaning.
-  - Suffix harmonization (`pvt ltd` $\to$ `private limited`, `corp` $\to$ `corporation`, `rd` $\to$ `road`, etc.).
-  - Language-agnostic structural address extraction (street/building numbers, unit numbers, postal codes).
-- [ ] **2.2 4-Pass Hybrid Blocking Strategy**
-  - **Pass 1 (Sorted Core-Token Key):**
-    - Strip stopwords and legal suffixes; **sort core tokens alphabetically** + Country + Postal code (where present). Solves word-order flips directly at the source.
-  - **Pass 2 (3-Gram MinHash / Sparse Inverted Index):**
-    - Word & 3-gram character TF-IDF on cleaned business name + address.
-    - **Chunked dot products:** Process queries in chunks of 10,000 records to prevent OOM memory spikes.
-  - **Pass 3 (Physical Address Anchor Index):**
-    - Key: `(Street Number, First 3 letters of Name, Country)`.
-    - Catches entities with heavily shortened names or DBAs sharing the same physical location.
-  - **Pass 4 (Multilingual Bi-Encoder + FAISS GPU):**
-    - Encode name + address using `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`.
-    - Retrieve top-5 nearest neighbors via FAISS GPU index to capture phonetic transliterations and semantic variants.
-- [ ] **2.3 Candidate Aggregation & Deduplication**
-  - Merge candidates from all 4 passes.
-  - Enforce top-$N$ cap (20–30 candidates per $S1$ entity) based on multi-pass consensus.
-  - Measure **Recall Ceiling** and **Reduction Ratio** on validation set.
-- [ ] **2.4 Export Candidate File**
-  - Save as `output/candidate_pairs.tsv` formatted as `source1_entity_id\tcandidate_entity_ids`.
+- [ ] **2.1 5 Independent Sharded Blocking Passes**
+  - **Pass 1 (Exact Structural):** `(country, postal_code, name_tokens_sorted[0..1])` and `(country, street_number, name_core)`.
+  - **Pass 2 (Name Postings):** Sharded token inverted index + character 3-gram/4-gram postings.
+  - **Pass 3 (Address Anchors):** `(country, street_number, first 3 chars of name)`.
+  - **Pass 4 (Phonetic Fallback):** Double Metaphone / Soundex on primary name tokens.
+  - **Pass 5 (Semantic / Dense Fallback):** Multilingual bi-encoder (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` + FAISS) applied selectively where candidate density is low.
+- [ ] **2.2 Empirical Candidate Pool Optimization**
+  - Benchmark candidate pool sizes ($K \in [10, 20, 30, 50, 75, 100]$).
+  - Measure: Blocking Recall, Average Candidates, P95, P99, RAM, and Indexing Time.
+  - Select the optimal $K$ guaranteeing $>99\%$ recall.
+- [ ] **2.3 Export Candidate File**
+  - Save candidate set as `output/candidate_pairs.tsv` (`source1_entity_id\tcandidate_entity_ids`).
 
 ---
 
-## Phase 3: Feature Engineering, Model Training & Joint Calibration
-> **Goal:** Train a high-precision ML classifier with group-rank features, resolve class imbalance, and jointly calibrate decision gates to maximize Macro $F_{0.5}$.
+## Phase 3: Stratified Hard-Negative Mining
+> **Goal:** Construct a robust, reproducible training pair dataset reflecting the true difficulty of entity resolution.
 
-- [ ] **3.1 Pairwise Feature Engineering**
-  - **Absolute Similarity Features (RapidFuzz C++):**
-    - Name: `token_sort_ratio`, `token_set_ratio`, `partial_ratio`, `levenshtein_distance`, `jaro_winkler`.
-    - Brand integrity: `first_token_exact_match`, length ratio.
-    - Address: Universal street number match, token Jaccard, postal code match score.
-  - **Within-Group Relative & Rank Features (Key High-Value Addition):**
-    - `rank_in_group`: Rank of this candidate's name similarity among all candidates for the same $S1$ entity.
-    - `margin_to_best`: Difference between top-1 candidate score and current candidate score.
-    - `margin_to_second`: Difference between top-1 and second-best candidate (large margin indicates an unambiguous match).
-    - `score_to_mean_ratio`: Ratio of candidate's score to the average score in the candidate group.
-  - **Structural Flags:**
-    - Source indicator (`is_source_2`, `is_source_3`).
-    - Blocking hit count (1 to 4).
-- [ ] **3.2 Addressing Class Imbalance & Training LightGBM**
-  - Downsample negative candidate pairs to ~1:8 ratio and set `scale_pos_weight` in LightGBM.
-  - Train LightGBM Binary Classifier / Ranker with GroupKFold cross-validation.
-- [ ] **3.3 Joint 2D Calibration Harness for Macro $F_{0.5}$**
-  - Build a vectorized evaluation harness that accepts $(\tau_{\text{singleton}}, \tau_{\text{match}})$ and calculates Macro $F_{0.5}$ directly.
-  - **Gate 1 (Singleton Gate):** If $\max(P) < \tau_{\text{singleton}}$, predict empty match $\to$ preserve 1.0 singleton credit.
-  - **Gate 2 (Match Gate):** For non-singletons, include candidate $c$ only if $P(c) \ge \tau_{\text{match}}$.
-  - Execute 2D grid search over $\tau_{\text{singleton}} \in [0.50, 0.85]$ and $\tau_{\text{match}} \in [0.65, 0.90]$ to find the global optimum.
+- [ ] **3.1 Hard-Negative Mining**
+  - For each positive pair ($y=1$), sample:
+    - 3–10 **Hard Negatives** ($y=0$): Candidates sharing same postal code or street number with high string similarity.
+    - 1–3 **Easy Negatives** ($y=0$): Random candidates from the blocking pool.
+- [ ] **3.2 Persist Training Pairs**
+  - Save the constructed pair dataset to disk for repeatable, deterministic experiments across model iterations.
 
 ---
 
-## Phase 4: JarvisLabs Setup & Full-Scale Scaling
-> **Goal:** Scale the verified pipeline to the full 12+ million records on JarvisLabs cloud GPU.
+## Phase 4: Tri-Partite Feature Engineering Engine
+> **Goal:** Extract fine-grained discriminative signals using C++ RapidFuzz, relative within-group ranks, and cross-field interaction rules.
 
-- [ ] **4.1 Spin Up JarvisLabs Instance**
-  - Select GPU: **RTX 5000 Ada / RTX 6000 Ada / RTX 4090** (24–32 GB VRAM).
-  - Framework: **PyTorch**, Storage: **80 GB – 100 GB**.
-- [ ] **4.2 Data & Code Upload**
-  - Package local code and datasets:
-    ```powershell
-    Compress-Archive -Path student_resource -DestinationPath student_resource.zip
-    scp -P <PORT> student_resource.zip root@<JARVIS_IP>:/home/
-    ```
-- [ ] **4.3 Full Training & Candidate Generation on JarvisLabs**
-  - Run full-scale 4-pass blocking across test records (using chunked TF-IDF and GPU-accelerated FAISS).
-  - Train LightGBM model on full training candidate pairs.
-- [ ] **4.4 Full Test Inference & Export**
-  - Generate full `output/matching_results.tsv` and `output/candidate_pairs.tsv`.
-  - Download artifacts back to local machine and terminate instance.
+- [ ] **4.1 Absolute String & Numerical Similarities (RapidFuzz C++)**
+  - Name: `token_sort_ratio`, `token_set_ratio`, `WRatio`, `partial_ratio`, `levenshtein_distance`, `jaro_winkler`, 3-gram/4-gram overlap, exact first-token match.
+  - Address: `token_jaccard`, `token_overlap`, `street_number_exact`, `street_number_sim`, `postal_exact`, `postal_prefix_match`, shared numeric sequence count.
+- [ ] **4.2 Within-Group Relative Rank Features**
+  - `rank_in_group`: Rank of this candidate's name similarity among all candidates for the same $S1$ entity.
+  - `margin_to_best`: Difference between top candidate score and current candidate score.
+  - `margin_to_second`: Gap between top-1 and second-best candidate.
+  - `score_to_mean_ratio`: Ratio of candidate similarity to group average.
+- [ ] **4.3 Non-Linear Cross-Field Interaction Features**
+  - `name_strong AND address_strong`
+  - `name_strong AND postal_exact`
+  - `address_strong AND street_number_exact`
+  - `name_exact BUT address_conflict` (guards against branch stores at different locations)
+  - `postal_exact BUT name_conflict` (guards against different stores in the same shopping mall)
 
 ---
 
-## Phase 5: Verification, Submission Package & Documentation
-> **Goal:** Validate formatting compliance and generate the final zip package.
+## Phase 5: LightGBM Model Training
+> **Goal:** Train a fast gradient-boosted decision tree optimized for high-precision entity resolution.
 
-- [ ] **5.1 Local Output Validation**
-  - Run official validator:
-    ```bash
-    python student_resource/utils/validate_submission.py \
-        --matching student_resource/output/matching_results.tsv \
-        --candidate student_resource/output/candidate_pairs.tsv \
-        --test-dir student_resource/dataset/test \
-        --check-ids
-    ```
-- [ ] **5.2 Complete Documentation Template**
-  - Fill out [`student_resource/Documentation_template.md`](file:///C:/Users/ritvi/AmazonMLChallenge/student_resource/Documentation_template.md).
-- [ ] **5.3 Final Package Construction**
-  - Build final submission archive:
-    ```
-    <team_name>_submission.zip
-    ├── output/
-    │   ├── matching_results.tsv
-    │   └── candidate_pairs.tsv
-    ├── code/
-    │   └── business_entity_resolution/
-    │       ├── src/
-    │       ├── README.md
-    │       └── requirements.txt
-    └── Documentation_template.md
-    ```
+- [ ] **5.1 LightGBM Binary Classifier**
+  - Train with GroupKFold cross-validation, configuring `scale_pos_weight` to account for imbalance.
+  - Feature importance analysis: prune low-gain features to maximize inference speed.
+- [ ] **5.2 Comparison with LightGBM Ranker**
+  - Train LambdaMART ranker; retain only if it measurably outperforms the binary classifier on Macro $F_{0.5}$.
+
+---
+
+## Phase 6: Per-$S1$ Decision Engine, Ambiguity Filter & 2D Calibration
+> **Goal:** Translate pairwise probabilities into global macro-optimal predictions.
+
+- [ ] **6.1 Per-Entity Structural Logic**
+  - Compute $P_{(1)}$ (best score), $P_{(2)}$ (runner-up), and margin $\Delta$.
+  - **Singleton Gate:** If $P_{(1)} < \tau_{\text{singleton}}$, output empty string (protects 1.0 score).
+  - **Multi-Match Inclusion Gate:** Include candidates where $P(c) \ge \tau_{\text{match}}$ and $(P_{(1)} - P(c)) \le \delta_{\text{margin}}$.
+- [ ] **6.2 Secondary Record Ambiguity Filter**
+  - Detect when the same secondary record ($S2\text{-}X$) is strongly claimed by multiple $S1$ entities.
+  - Test conflict-resolution rules on validation set to minimize false merges.
+- [ ] **6.3 Joint 2D Calibration Search**
+  - Run grid search over $(\tau_{\text{singleton}}, \tau_{\text{match}})$ directly maximizing Macro $F_{0.5}$.
+
+---
+
+## Phase 7: Progressive Scaling & Cloud Deployment
+> **Goal:** Benchmark and profile before scaling to full test inference.
+
+- [ ] **7.1 Progressive Local Verification**
+  - Run pipeline on 50k slice $\to$ benchmark runtime, RAM, and $F_{0.5}$.
+  - Scale to 200k slice $\to$ confirm linear memory scaling and index performance.
+- [ ] **7.2 JarvisLabs Full-Scale Execution**
+  - Spin up cloud instance (RTX 4090 / RTX 5000 Ada, 80–100 GB disk).
+  - Run full test candidate generation across 11.7M records.
+  - Run batched LightGBM inference and export final `matching_results.tsv` and `candidate_pairs.tsv`.
+
+---
+
+## Phase 8: Submission Packaging & Documentation
+> **Goal:** Validate formatting compliance and build the official zip package.
+
+- [ ] **8.1 Run Official Submission Validator**
+  - Verify output with `student_resource/utils/validate_submission.py --check-ids`.
+- [ ] **8.2 Fill Documentation Template**
+  - Complete [`student_resource/Documentation_template.md`](file:///C:/Users/ritvi/AmazonMLChallenge/student_resource/Documentation_template.md).
+- [ ] **8.3 Build Final Zip Package**
+  - Package `output/`, `code/business_entity_resolution/`, and `Documentation_template.md`.
