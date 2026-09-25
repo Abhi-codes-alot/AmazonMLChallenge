@@ -15,9 +15,9 @@ Our goal is to build an end-to-end Entity Resolution pipeline that links referen
             ┌───────────────────────────┐         ┌──────────────────────────┐         ┌─────────────────────────┐
             │ Multi-View Sharded Index  │         │  LightGBM Matcher        │         │ Per-S1 Decision Engine  │
 Input Data ─┤ • Multi-View Normalization├────────>│ • Absolute String Sim    ├────────>│ • Best Score & Gap     │──> Final Outputs
-(11.7M rows)│ • 5 Independent Passes    │         │ • Relative Rank Features │         │ • Singleton Detector    │
+(11.7M rows)│ • 5 Complementary Passes  │         │ • Relative Rank Features │         │ • Singleton Detector    │
             │ • Empirical Candidate Cap │         │ • Cross-Field Interaction│         │ • Ambiguity Filter      │
-            │   (Top 10..100 evaluation)│         │ • Hard-Negative Mining   │         │ • Joint 2D Calibration  │
+            │   (Top 10..100 evaluation)│         │ • Hard-Negative Mining   │         │ • Joint 3D Calibration  │
             └───────────────────────────┘         └──────────────────────────┘         └─────────────────────────┘
                  (Recall Ceiling > 99%,               (Discriminative Ranking)              (Macro F0.5 Optimized)
                   P95/P99 Tracked)
@@ -43,7 +43,7 @@ Input Data ─┤ • Multi-View Normalization├────────>│ �
 
 4. **The Zero-Shot "France" Generalization Curveball**:
    * Training set contains only `US` and `India`. Test set introduces `France`.
-   * Hardcoding US state codes, Indian PIN-code logic, or country one-hot models will fail catastrophically on French test records.
+   * Hardcoding US state codes, Indian PIN-code logic, fixed digit lengths, or country one-hot models will fail catastrophically on French test records. Structural address parsing must be strictly language- and country-agnostic.
 
 5. **Single-String Aggressive Normalization**:
    * Replacing original strings with a single aggressively normalized version destroys subtle but decisive brand signals (e.g. `ABC Ltd` vs `ABC Logistics` vs `ABC Logistics Pvt Ltd`).
@@ -54,13 +54,13 @@ Input Data ─┤ • Multi-View Normalization├────────>│ �
 
 | Component | Standard Competitor Approach | Our Upgraded Strategy |
 | :--- | :--- | :--- |
-| **Data Representation** | Single aggressive canonical string | **Multi-View Representation**: Preserves raw text, normalized tokens, core alphanumeric keys, and extracted numbers simultaneously. |
-| **Blocking Passes** | Single key or un-chunked TF-IDF | **5 Independent Sharded Passes**: Exact structural + Name token/n-gram index + Address number/anchor index + Phonetic + High-recall fallback. |
+| **Data Representation** | Single aggressive canonical string | **Multi-View Representation**: Preserves raw text, normalized tokens, core alphanumeric keys, and generic structural numeric tokens simultaneously. |
+| **Blocking Passes** | Single key or un-chunked TF-IDF | **5 Complementary Sharded Passes**: Exact structural + Name token/n-gram index + Address number/anchor index + Phonetic + Optional selective semantic fallback. |
 | **Candidate Cap** | Fixed arbitrary limit (e.g. 20) | **Empirical Curve Selection**: Measure recall vs P95/P99 candidate count across Top 10, 20, 30, 50, 75, 100. |
-| **Training Samples** | Balanced random pairs (1:1) | **Stratified Hard-Negative Mining**: 1 positive : 3–10 hard negatives (same street/zip + similar name) : 1–3 random negatives. |
+| **Training Samples** | Balanced random pairs (1:1) | **Stratified Hard-Negative Mining**: 1 positive : 3–10 hard negatives (same street/postal + similar name) : 1–3 random negatives. Persisted to disk. |
 | **Feature Engineering** | Basic string distances only | **Tri-Partite Features**: Absolute string similarities + Group-relative ranks + Non-linear cross-field interactions. |
 | **Decision Engine** | Single scalar probability cutoff | **Per-S1 Structural Gate + Secondary Ambiguity Filter**: Evaluates best score, second-best score, margin, and multi-S1 conflict resolution. |
-| **Threshold Calibration** | 1D search on accuracy | **Joint 2D Calibration Harness** $(\tau_{\text{singleton}}, \tau_{\text{match}})$ optimizing Macro $F_{0.5}$ directly. |
+| **Threshold Calibration** | 1D search on accuracy | **Joint 3D Calibration Harness** $(\tau_{\text{singleton}}, \tau_{\text{match}}, \delta_{\text{margin}})$ optimizing Macro $F_{0.5}$ directly. |
 | **Validation Scheme** | Random pair split (data leakage) | **GroupKFold by `source1_entity_id`** + **Cross-Country Zero-Shot Holdout** (train on US, validate on India to simulate France). |
 | **Execution Scaling** | Immediate leap to full cloud dataset | **Progressive Verification**: Local (50k) $\to$ 200k $\to$ 500k $\to$ 1M $\to$ Full Cloud Scale. |
 
@@ -68,16 +68,17 @@ Input Data ─┤ • Multi-View Normalization├────────>│ �
 
 ## 4. End-to-End Technical Architecture
 
-### 4.1 Step 0: Initial Data Sanity & Country Verification
+### 4.1 Phase 0: Data Sanity & Empirical Country Check
 Before training or hard-blocking:
-1. Verify schema, row counts, and null counts across all TSVs.
+1. Verify schema, row counts, and missingness across all TSVs.
 2. **Empirical Country Match Check:** Compute in `train_ground_truth.tsv`:
    $$\sum \mathbf{1}[\text{country}(S1) \ne \text{country}(S2/S3)]$$
    * If strictly 0: enforce `candidate_country == source1_country` as an absolute blocking constraint (cuts search space by ~70%).
    * If $> 0$: retain country compatibility as a high-weight soft feature rather than a hard drop.
 3. Compute baseline singleton percentage and match cardinality distribution (P50, P90, P99).
+4. Run a minimal baseline blocker to ensure submission formatting and official validator passes (`PASS (exit 0)`).
 
-### 4.2 Step 1: Multi-View Data Normalization
+### 4.2 Phase 1: Multi-View Data Normalization
 Rather than destructive string replacement, retain parallel views:
 * **Name Views:**
   * `name_raw`: Original string as provided.
@@ -85,16 +86,16 @@ Rather than destructive string replacement, retain parallel views:
   * `name_core`: Stopwords and legal suffixes (`inc`, `llc`, `pvt ltd`, `sarl`, `sa`, `corp`) stripped.
   * `name_alnum`: Alphanumeric-only representation.
   * `name_tokens_sorted`: Core tokens sorted alphabetically (eliminates word-order flips).
-* **Address Views:**
+* **Address Views (Genuinely Open-Set):**
   * `address_raw`: Original address string.
   * `address_normalized`: Standardized abbreviations (`rd` $\to$ `road`, `st` $\to$ `street`, etc.).
   * `address_numbers`: Extracted sequence of building/street/unit digits (language-agnostic).
-  * `postal_tokens`: Extracted 5-digit (US/France) and 6-digit (India) postal tokens.
+  * `postal_candidate_tokens`: Structurally detected alphanumeric postal-like tokens (no hardcoded country lengths; works seamlessly on US, India, and France).
 
-### 4.3 Step 2: 5 Independent Sharded Blocking Passes
+### 4.3 Phase 2: 5 Complementary Sharded Blocking Passes
 Instead of a monolithic sparse matrix, build sharded inverted postings:
 * **PASS 1 — Exact Structural Match:**
-  * Keys: `(country, postal_code, name_tokens_sorted[0..1])` and `(country, street_number, name_core)`.
+  * Keys: `(country, postal_candidate_token, name_tokens_sorted[0..1])` and `(country, street_number, name_core)`.
 * **PASS 2 — Name Inverted Postings:**
   * Sharded inverted index on core name tokens and character 3-grams/4-grams.
   * Top-$K$ retrieval per query using token frequency scoring.
@@ -103,14 +104,22 @@ Instead of a monolithic sparse matrix, build sharded inverted postings:
   * Recovers businesses with alternate trade names (DBAs) sharing the exact physical location.
 * **PASS 4 — Phonetic Recovery:**
   * Double Metaphone / Soundex on primary name tokens to recover typos and transliterations.
-* **PASS 5 — High-Recall Semantic / Dense Fallback (Optional):**
-  * Multilingual embedding search (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` + FAISS) applied selectively for records with low candidate density.
+* **PASS 5 — Optional & Experimental Semantic Fallback:**
+  * Multilingual embedding search (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` + FAISS) applied **strictly to records with low candidate density** after Passes 1–4.
+  * Measured for incremental recall vs runtime cost; discarded if incremental contribution does not justify overhead.
 * **Candidate Pool Curve Measurement:**
   * Evaluate candidate pool sizes ($K \in [10, 20, 30, 50, 75, 100]$).
   * Select the optimal $K$ that achieves $>99\%$ blocking recall while minimizing average and P99 candidate count.
   * Export intermediate candidates directly as `candidate_pairs.tsv`.
 
-### 4.4 Step 3: Tri-Partite Feature Engineering Engine (RapidFuzz C++)
+### 4.4 Phase 3: Stratified Hard-Negative Mining
+* **Training Set Construction:**
+  * Positive pairs ($y=1$): All ground-truth matches.
+  * Hard negatives ($y=0$): Candidates sharing same postal token or street number with high string similarity but different entity ID ($3\text{–}10\times$ positives).
+  * Easy negatives ($y=0$): Random candidate samples ($1\text{–}3\times$ positives).
+  * Persist this dataset to disk for strict experimental reproducibility.
+
+### 4.5 Phase 4: Tri-Partite Feature Engineering Engine (RapidFuzz C++)
 For every candidate pair $(S1, S2/S3)$, extract:
 1. **Absolute Similarity Vector:**
    * Name: `token_sort_ratio`, `token_set_ratio`, `WRatio`, `partial_ratio`, `levenshtein_distance`, `jaro_winkler`, 3-gram/4-gram overlap, exact first-token match.
@@ -127,17 +136,11 @@ For every candidate pair $(S1, S2/S3)$, extract:
    * `name_exact BUT address_conflict` (guards against branch stores at different locations)
    * `postal_exact BUT name_conflict` (guards against different stores in the same shopping mall)
 
-### 4.5 Step 4: Stratified Hard-Negative Mining & LightGBM
-* **Training Set Construction:**
-  * Positive pairs ($y=1$): All ground-truth matches.
-  * Hard negatives ($y=0$): Candidates sharing same postal code or street number with high string similarity but different entity ID ($3\text{–}10\times$ positives).
-  * Easy negatives ($y=0$): Random candidate samples ($1\text{–}3\times$ positives).
-  * Persist this dataset to disk for strict experimental reproducibility.
-* **Model Training:**
-  * LightGBM Binary Classifier with GroupKFold cross-validation (grouped by `source1_entity_id`).
-  * Compare against LightGBM Ranker (`lambdarank`) and retain whichever demonstrates superior Macro $F_{0.5}$.
+### 4.6 Phase 5: LightGBM Model Training
+* Train LightGBM Binary Classifier with GroupKFold cross-validation (grouped by `source1_entity_id`).
+* Compare against LightGBM Ranker (`lambdarank`) and retain whichever demonstrates superior Macro $F_{0.5}$.
 
-### 4.6 Step 5: Per-$S1$ Structural Decision Engine & Ambiguity Filter
+### 4.7 Phase 6: Per-$S1$ Decision Engine, Ambiguity Filter & Joint 3D Calibration
 Rather than applying a single naive probability cutoff:
 1. **Candidate Group Profiling:**
    * For each $S1$, compute $P_{(1)}$ (best probability), $P_{(2)}$ (second best), and margin $\Delta = P_{(1)} - P_{(2)}$.
@@ -146,9 +149,11 @@ Rather than applying a single naive probability cutoff:
 3. **Multi-Match Inclusion Gate:**
    * If $P_{(1)} \ge \tau_{\text{singleton}}$, include all candidates $c$ where $P(c) \ge \tau_{\text{match}}$ and $(P_{(1)} - P(c)) \le \delta_{\text{margin}}$.
 4. **Secondary Record Ambiguity Check:**
-   * If a single secondary record (e.g. $S2\text{-}X$) is strongly claimed by two distinct $S1$ entities ($S1_A$ with $0.94$ and $S1_B$ with $0.91$), apply a conflict resolution check before final output.
-5. **Joint 2D Calibration Harness:**
-   * Grid search over $(\tau_{\text{singleton}}, \tau_{\text{match}})$ directly evaluating Macro $F_{0.5}$ on the validation set.
+   * If a single secondary record (e.g. $S2\text{-}X$) is strongly claimed by two distinct $S1$ entities ($S1_A$ with $0.94$ and $S1_B$ with $0.91$), apply conflict resolution before final output.
+5. **Joint 3D Calibration Search:**
+   * Perform grid search over $(\tau_{\text{singleton}}, \tau_{\text{match}}, \delta_{\text{margin}})$:
+     - Coarse search: $\tau_{\text{singleton}} \in [0.50, 0.90]$, $\tau_{\text{match}} \in [0.60, 0.90]$, $\delta_{\text{margin}} \in [0.05, 0.20]$.
+     - Refinement search around peak Macro $F_{0.5}$ on the validation split.
 
 ---
 
@@ -160,7 +165,14 @@ Every experiment must report this standardized metric block before code changes 
 ================================================
 EXPERIMENT: [experiment_id]
 ================================================
-Blocking Recall:             XX.X %
+Blocking Recall (Union):     XX.X %
+Incremental Recall:
+  Pass 1 (Exact Structural): XX.X %
+  Pass 2 (Name Postings):    +XX.X %
+  Pass 3 (Address Anchors):  +XX.X %
+  Pass 4 (Phonetic):         +XX.X %
+  Pass 5 (Semantic Fallback):+XX.X %
+
 Avg Candidates / S1:         XX.X
 P95 Candidates:              XX
 P99 Candidates:              XX
@@ -193,6 +205,6 @@ Local Laptop (50k sample) ────> Local Verification (200k) ────> 
                                                                 final submission
 ```
 
-* **Step 1:** Local 50k slice: test multi-view normalization, blocking recall, and baseline classifier.
+* **Step 1:** Local 50k slice: test multi-view normalization, incremental blocking recall, and baseline classifier.
 * **Step 2:** Local 200k slice: profile memory, index build times, and hard-negative mining.
 * **Step 3:** Cloud execution on JarvisLabs: run full candidate generation and inference across the complete 11.7M dataset.

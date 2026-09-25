@@ -9,23 +9,23 @@
 ---
 
 ```
-                       END-TO-END PIPELINE ARCHITECTURE
+                       FINAL PIPELINE ARCHITECTURE
  ┌─────────────────┐       ┌──────────────────────┐       ┌──────────────────────┐
- │ Raw Input Data  │ ────> │ Multi-View Normalize │ ────> │ 5-Pass Sharded Block │
- │ (S1, S2, S3)    │       │ (raw, core, numbers) │       │ (Empirical Top-K)    │
+ │ Raw Input Data  │ ────> │ Multi-View Normalize │ ────> │ 5 Complementary      │
+ │ (S1, S2, S3)    │       │ (raw, core, numbers) │       │ Sharded Blocks (TopK)│
  └─────────────────┘       └──────────────────────┘       └──────────┬───────────┘
                                                                      │
  ┌─────────────────┐       ┌──────────────────────┐                  │ Candidate Pool
  │ Final Outputs   │ <──── │ Per-S1 Decision &    │ <──── ┌──────────┴───────────┐
  │ & Submissions   │       │ Ambiguity Filter     │       │ LightGBM Classifier  │
- └─────────────────┘       └──────────────────────┘       │ + Rank & Cross Feats │
-                                                          └──────────────────────┘
+ └─────────────────┘       │ (Joint 3D Calibrate) │       │ + Rank & Cross Feats │
+                           └──────────────────────┘       └──────────────────────┘
 ```
 
 ---
 
 ## Phase 0: Data Sanity, Country Validation & Baseline Pipeline
-> **Goal:** Verify data integrity, test the empirical country matching assumption, and build a minimal working submission that passes the official validator.
+> **Goal:** Verify data integrity, test the empirical country matching assumption, analyze distributions, and establish a working baseline that passes the official validator.
 
 - [ ] **0.1 Data Sanity & Cardinality Inspection**
   - Verify schema, line counts, and missingness across all train and test TSVs.
@@ -36,7 +36,8 @@
     ```python
     sum(country_S1 != country_S2_or_S3)
     ```
-  - If 0, establish country as an absolute hard partition; if > 0, preserve cross-country candidates with a penalty feature.
+  - If strictly 0: establish country as an absolute hard partition.
+  - If > 0: preserve cross-country candidates with a soft penalty feature.
 - [ ] **0.3 Fail-Safe Baseline Pipeline**
   - Implement a fast rule-based blocker (exact normalized name) on a small slice.
   - Generate initial dummy `output/matching_results.tsv` and `output/candidate_pairs.tsv`.
@@ -50,7 +51,7 @@
 - [ ] **1.1 Multi-View Data Normalization**
   - Extract parallel representations for each record:
     - Name views: `name_raw`, `name_normalized`, `name_core`, `name_alnum`, `name_tokens_sorted`.
-    - Address views: `address_raw`, `address_normalized`, `address_numbers`, `postal_tokens`.
+    - Address views: `address_raw`, `address_normalized`, `address_numbers`, `postal_candidate_tokens` (generic structural detection without hardcoded country digit lengths).
 - [ ] **1.2 Group-Aware Validation Split (by `source1_entity_id`)**
   - Maintain a locked validation set split strictly by `source1_entity_id` (prevent candidate leakage).
 - [ ] **1.3 Cross-Country Zero-Shot Holdout Experiment**
@@ -60,20 +61,27 @@
 
 ---
 
-## Phase 2: 5-Pass Sharded Blocking & Candidate Pool Curve
-> **Goal:** Build diverse, independent blocking passes using sharded inverted postings and empirically optimize the candidate cap.
+## Phase 2: 5 Complementary Sharded Blocking Passes & Recall Analysis
+> **Goal:** Build diverse candidate generators using sharded inverted postings, evaluate per-pass incremental recall, and empirically optimize the candidate cap.
 
-- [ ] **2.1 5 Independent Sharded Blocking Passes**
-  - **Pass 1 (Exact Structural):** `(country, postal_code, name_tokens_sorted[0..1])` and `(country, street_number, name_core)`.
+- [ ] **2.1 5 Complementary Sharded Blocking Passes**
+  - **Pass 1 (Exact Structural):** `(country, postal_candidate_token, name_tokens_sorted[0..1])` and `(country, street_number, name_core)`.
   - **Pass 2 (Name Postings):** Sharded token inverted index + character 3-gram/4-gram postings.
   - **Pass 3 (Address Anchors):** `(country, street_number, first 3 chars of name)`.
   - **Pass 4 (Phonetic Fallback):** Double Metaphone / Soundex on primary name tokens.
-  - **Pass 5 (Semantic / Dense Fallback):** Multilingual bi-encoder (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` + FAISS) applied selectively where candidate density is low.
-- [ ] **2.2 Empirical Candidate Pool Optimization**
+  - **Pass 5 (Optional & Experimental Semantic Fallback):** Multilingual bi-encoder (`paraphrase-multilingual-MiniLM-L12-v2` + FAISS) applied strictly to records with low candidate density after Passes 1–4.
+- [ ] **2.2 Per-Pass Incremental Recall Analysis**
+  - Measure recall contribution per pass:
+    - Pass 1 recall
+    - Pass 2 incremental recall
+    - Pass 3 incremental recall
+    - Pass 4 incremental recall
+    - Pass 5 incremental recall (adopt only if gain justifies runtime)
+- [ ] **2.3 Empirical Candidate Pool Optimization**
   - Benchmark candidate pool sizes ($K \in [10, 20, 30, 50, 75, 100]$).
   - Measure: Blocking Recall, Average Candidates, P95, P99, RAM, and Indexing Time.
   - Select the optimal $K$ guaranteeing $>99\%$ recall.
-- [ ] **2.3 Export Candidate File**
+- [ ] **2.4 Export Candidate File**
   - Save candidate set as `output/candidate_pairs.tsv` (`source1_entity_id\tcandidate_entity_ids`).
 
 ---
@@ -83,7 +91,7 @@
 
 - [ ] **3.1 Hard-Negative Mining**
   - For each positive pair ($y=1$), sample:
-    - 3–10 **Hard Negatives** ($y=0$): Candidates sharing same postal code or street number with high string similarity.
+    - 3–10 **Hard Negatives** ($y=0$): Candidates sharing same postal token or street number with high string similarity.
     - 1–3 **Easy Negatives** ($y=0$): Random candidates from the blocking pool.
 - [ ] **3.2 Persist Training Pairs**
   - Save the constructed pair dataset to disk for repeatable, deterministic experiments across model iterations.
@@ -121,18 +129,20 @@
 
 ---
 
-## Phase 6: Per-$S1$ Decision Engine, Ambiguity Filter & 2D Calibration
+## Phase 6: Per-$S1$ Decision Engine, Ambiguity Filter & Joint 3D Calibration
 > **Goal:** Translate pairwise probabilities into global macro-optimal predictions.
 
 - [ ] **6.1 Per-Entity Structural Logic**
-  - Compute $P_{(1)}$ (best score), $P_{(2)}$ (runner-up), and margin $\Delta$.
+  - Compute $P_{(1)}$ (best score), $P_{(2)}$ (runner-up), and margin $\Delta = P_{(1)} - P_{(2)}$.
   - **Singleton Gate:** If $P_{(1)} < \tau_{\text{singleton}}$, output empty string (protects 1.0 score).
   - **Multi-Match Inclusion Gate:** Include candidates where $P(c) \ge \tau_{\text{match}}$ and $(P_{(1)} - P(c)) \le \delta_{\text{margin}}$.
 - [ ] **6.2 Secondary Record Ambiguity Filter**
   - Detect when the same secondary record ($S2\text{-}X$) is strongly claimed by multiple $S1$ entities.
-  - Test conflict-resolution rules on validation set to minimize false merges.
-- [ ] **6.3 Joint 2D Calibration Search**
-  - Run grid search over $(\tau_{\text{singleton}}, \tau_{\text{match}})$ directly maximizing Macro $F_{0.5}$.
+  - Apply conflict-resolution rules on validation set to minimize false merges.
+- [ ] **6.3 Joint 3D Calibration Search**
+  - Run grid search over $(\tau_{\text{singleton}}, \tau_{\text{match}}, \delta_{\text{margin}})$:
+    - Coarse search: $\tau_{\text{singleton}} \in [0.50, 0.90]$, $\tau_{\text{match}} \in [0.60, 0.90]$, $\delta_{\text{margin}} \in [0.05, 0.20]$.
+    - Refinement search around peak Macro $F_{0.5}$.
 
 ---
 
