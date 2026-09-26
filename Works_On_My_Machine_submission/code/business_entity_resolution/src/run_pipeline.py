@@ -160,15 +160,29 @@ def extract_postal_codes(addr, country=None):
 
 def get_multi_pass_blocks(name, addr, country=None):
     blocks = []
-    toks = clean_tokens(name)
-    if toks:
-        blocks.append(('tok1', toks[0]))
-        if len(toks) >= 2:
-            blocks.append(('tok12', toks[0] + '_' + toks[1]))
+    norm_name = normalize_multilingual_text(name).replace(" ", "")
+    
+    # Lane 1: Exact/Strong Prefix (first 5 chars)
+    if len(norm_name) >= 5:
+        blocks.append(('prefix5', norm_name[:5]))
+    elif len(norm_name) > 0:
+        blocks.append(('prefix5', norm_name))
+        
+    # Lane 2: Character 3-Grams (Approximate TF-IDF via consonant density)
+    if len(norm_name) >= 3:
+        ngrams = [norm_name[i:i+3] for i in range(len(norm_name)-2)]
+        consonants = set("bcdfghjklmnpqrstvwxyz")
+        ngrams.sort(key=lambda x: len(set(x) & consonants), reverse=True)
+        blocks.append(('3gram', ngrams[0]))
+        if len(ngrams) > 1:
+            blocks.append(('3gram', ngrams[1]))
+            
+    # Lane 3: Geo-Spatial/Address (Exact Postal Code)
     pins = extract_postal_codes(addr, country)
     for pin in pins:
         blocks.append(('post', pin))
-    return blocks
+        
+    return list(set(blocks))
 
 # ---------------------------------------------------------
 # 3. 12 Pairwise Similarity Features
@@ -384,6 +398,8 @@ def main():
     s2_ctry = train_s2['country'].tolist()
     for i in range(len(s2_names)):
         c = s2_ctry[i]
+        if pd.isna(c) or not c or str(c).lower() in ('nan', 'null', 'none', ''):
+            c = 'GLOBAL'
         for b in get_multi_pass_blocks(s2_names[i], s2_addrs[i], c):
             s2_train_idx[(c, b)].append(i)
 
@@ -394,6 +410,8 @@ def main():
     s3_ctry = train_s3['country'].tolist()
     for i in range(len(s3_names)):
         c = s3_ctry[i]
+        if pd.isna(c) or not c or str(c).lower() in ('nan', 'null', 'none', ''):
+            c = 'GLOBAL'
         for b in get_multi_pass_blocks(s3_names[i], s3_addrs[i], c):
             s3_train_idx[(c, b)].append(i)
 
@@ -418,11 +436,17 @@ def main():
         c = s1_train_df['country'].iloc[i]
         true_m = gt_map.get(s1_id, set())
 
+        if pd.isna(c) or not c or str(c).lower() in ('nan', 'null', 'none', ''):
+            search_countries = ['US', 'France', 'India', 'GLOBAL']
+        else:
+            search_countries = [c, 'GLOBAL']
+
         cands_s2 = set()
         cands_s3 = set()
-        for b in get_multi_pass_blocks(s1_n, s1_a, c):
-            cands_s2.update(s2_train_idx.get((c, b), []))
-            cands_s3.update(s3_train_idx.get((c, b), []))
+        for sc in search_countries:
+            for b in get_multi_pass_blocks(s1_n, s1_a, sc):
+                cands_s2.update(s2_train_idx.get((sc, b), []))
+                cands_s3.update(s3_train_idx.get((sc, b), []))
 
         cands_s2 = list(cands_s2)[:15]
         cands_s3 = list(cands_s3)[:15]
@@ -450,11 +474,17 @@ def main():
         s1_a = s1_val_df['business_address'].iloc[i]
         c = s1_val_df['country'].iloc[i]
 
+        if pd.isna(c) or not c or str(c).lower() in ('nan', 'null', 'none', ''):
+            search_countries = ['US', 'France', 'India', 'GLOBAL']
+        else:
+            search_countries = [c, 'GLOBAL']
+
         cands_s2 = set()
         cands_s3 = set()
-        for b in get_multi_pass_blocks(s1_n, s1_a, c):
-            cands_s2.update(s2_train_idx.get((c, b), []))
-            cands_s3.update(s3_train_idx.get((c, b), []))
+        for sc in search_countries:
+            for b in get_multi_pass_blocks(s1_n, s1_a, sc):
+                cands_s2.update(s2_train_idx.get((sc, b), []))
+                cands_s3.update(s3_train_idx.get((sc, b), []))
 
         cands_s2 = list(cands_s2)[:15]
         cands_s3 = list(cands_s3)[:15]
@@ -518,6 +548,8 @@ def main():
     s2_ctry = test_s2['country'].tolist()
     for i in range(len(s2_names)):
         c = s2_ctry[i]
+        if pd.isna(c) or not c or str(c).lower() in ('nan', 'null', 'none', ''):
+            c = 'GLOBAL'
         for b in get_multi_pass_blocks(s2_names[i], s2_addrs[i], c):
             s2_test_idx[(c, b)].append(i)
 
@@ -528,6 +560,8 @@ def main():
     s3_ctry = test_s3['country'].tolist()
     for i in range(len(s3_names)):
         c = s3_ctry[i]
+        if pd.isna(c) or not c or str(c).lower() in ('nan', 'null', 'none', ''):
+            c = 'GLOBAL'
         for b in get_multi_pass_blocks(s3_names[i], s3_addrs[i], c):
             s3_test_idx[(c, b)].append(i)
 
@@ -560,11 +594,17 @@ def main():
             s1_a = s1_addrs[i]
             c = s1_ctry[i]
 
+            if pd.isna(c) or not c or str(c).lower() in ('nan', 'null', 'none', ''):
+                search_countries = ['US', 'France', 'India', 'GLOBAL']
+            else:
+                search_countries = [c, 'GLOBAL']
+
             cands_s2 = set()
             cands_s3 = set()
-            for b in get_multi_pass_blocks(s1_n, s1_a, c):
-                cands_s2.update(s2_test_idx.get((c, b), []))
-                cands_s3.update(s3_test_idx.get((c, b), []))
+            for sc in search_countries:
+                for b in get_multi_pass_blocks(s1_n, s1_a, sc):
+                    cands_s2.update(s2_test_idx.get((sc, b), []))
+                    cands_s3.update(s3_test_idx.get((sc, b), []))
 
             cands_s2 = list(cands_s2)[:15]
             cands_s3 = list(cands_s3)[:15]
