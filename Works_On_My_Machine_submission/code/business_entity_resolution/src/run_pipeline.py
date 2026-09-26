@@ -65,9 +65,9 @@ import lightgbm as lgb
 HAS_CUDA = torch.cuda.is_available()
 DEVICE = "cuda" if HAS_CUDA else "cpu"
 
-DATA_DIR = Path("/content/dataset")
+DATA_DIR = Path("dataset")
 if not (DATA_DIR / "train" / "train_source1.tsv").exists():
-    for fallback in [Path("dataset"), Path("../../../dataset"), Path("../../../../dataset")]:
+    for fallback in [Path("/home/AmazonMLChallenge/dataset"), Path("../../../dataset"), Path("../../../../dataset")]:
         if (fallback / "train" / "train_source1.tsv").exists():
             DATA_DIR = fallback
             break
