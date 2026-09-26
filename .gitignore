@@ -32,6 +32,8 @@ checkpoints/
 output/
 student_resource/output/
 *.sub
+!Works_On_My_Machine_submission/output/
+!Works_On_My_Machine_submission/output/*.tsv
 
 # OS and Editor files
 .DS_Store
