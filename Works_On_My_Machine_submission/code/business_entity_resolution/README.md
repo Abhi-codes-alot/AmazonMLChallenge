@@ -17,5 +17,15 @@ This directory contains the self-contained pipeline for resolving business entit
 
 2. Run the end-to-end pipeline:
    ```bash
-   # Execution instructions will be added as implementation proceeds
+   python3 src/run_pipeline.py
+   ```
+   Or open and execute the Jupyter / Colab notebook:
+   `src/Amazon_ML.ipynb`
+
+3. Validate the submission outputs:
+   ```bash
+   python3 ../../../student_resource/utils/validate_submission.py \
+       --matching ../../output/matching_results.tsv \
+       --candidate ../../output/candidate_pairs.tsv \
+       --test-dir /content/dataset/test
    ```
