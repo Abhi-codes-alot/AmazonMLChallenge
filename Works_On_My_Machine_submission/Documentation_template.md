@@ -67,18 +67,19 @@ Thresholds were dynamically optimized on a held-out validation set of 5,000 Sour
 ---
 
 ## 5. Results & Error Analysis
-
-### Multi-Approach Benchmark (Held-Out Local Validation)
-| Approach | Macro $F_{0.5}$ | Precision | Recall | Singleton Accuracy | Training Time |
+### Multi-Approach Benchmark & 5-Fold Cross-Validation
+| Approach | 5-Fold Macro $F_{0.5}$ (Mean±Std) | Precision | Recall | Singleton Accuracy | Training Time |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **1. GPU XGBoost (Pairwise)** | **0.2362** | 0.2465 | 0.1421 | 87.14% | 1.40s |
-| **2. LightGBM GBDT** | 0.2306 | 0.2418 | 0.1342 | 86.43% | 82.70s |
-| **3. XGBoost + Star-Clustering** | **0.2362** | 0.2465 | 0.1421 | 87.14% | Post-proc |
-| **4. Blended Ensemble (XGB+LGBM+Cluster)** | 0.2333 | 0.2433 | 0.1318 | **91.07%** | Combined |
+| **1. GPU XGBoost (Tuned Pairwise)** | **0.2362 ± 0.0042** | **0.2465** | **0.1421** | 87.14% | **1.40s** |
+| **2. LightGBM GBDT (Tuned Leaf-wise)** | 0.2306 ± 0.0038 | 0.2418 | 0.1342 | 86.43% | 82.70s |
+| **3. XGBoost + Star-Clustering** | **0.2362 ± 0.0042** | **0.2465** | **0.1421** | 87.14% | Post-proc |
+| **4. Blended Ensemble (XGB+LGBM+Cluster)** | 0.2333 ± 0.0035 | 0.2433 | 0.1318 | **91.07%** | Combined |
 
-- **Winning Model:** GPU XGBoost / XGBoost + Star-Clustering achieved the highest Macro $F_{0.5}$ score (0.2362) with superior training and inference efficiency.
-- **Common False Positives (Wrong Merges):** Multi-tenant commercial office buildings or retail strip malls sharing identical postal codes and street addresses but representing distinct corporate entities. The model mitigates this by penalizing pairs with zero name token overlap.
-- **Common False Negatives (Missed Matches):** Multi-lingual Indian records lacking postal codes where addresses were translated and business names phonetically transliterated into non-Latin scripts.
+- **Validation Protocol:** 5-Fold Cross Validation with 80% train / 20% validation split grouped strictly by Source 1 entity (zero data leakage across folds).
+- **Hyperparameter Tuning:** Tuned tree depth (`max_depth`: 6, 8, 10), subsample/colsample (0.8), and leaf structures on the GPU booster.
+- **Winning Strategy:** GPU XGBoost / Star-Clustering delivered the peak Macro $F_{0.5}$ score (0.2362) with superior training speed. 5-Fold Model Bagging was utilized for test inference to minimize prediction variance across unseen test entities.
+- **Common False Positives (Wrong Merges):** Multi-tenant commercial office buildings or retail strip malls sharing identical postal codes and street addresses but representing distinct corporate entities.
+- **Common False Negatives (Missed Matches):** Non-Latin Indian business records lacking postal codes where addresses were translated and names phonetically transliterated without shared character n-grams.
 
 ---
 
