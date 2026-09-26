@@ -94,15 +94,7 @@ ENGLISH_INDIAN_LEGAL_SUFFIXES = {
     'लिमिटेड', 'प्राइवेट', 'प्रा', 'लि'
 }
 
-CORPUS_HUB_STOPWORDS = {
-    'unknown', 'headquarters', 'hq', 'ltd', 'corp', 'france', 'india', 'usa', 'us',
-    'paris', 'delhi', 'mumbai', 'bangalore', 'chennai', 'kolkata', 'new', 'city',
-    'center', 'centre', 'services', 'solutions', 'enterprises', 'near', 'opp',
-    'opposite', 'behind', 'beside', 'floor', 'shop', 'plot', 'no', 'block',
-    'building', 'commercial', 'business', 'store', 'market', 'plaza', 'the', 'and',
-    'of', 'for', 'in', 'at', 'by', 'a', 'an', 'de', 'la', 'le', 'les', 'du',
-    'des', 'et', 'en', 'pour', 'sur', 'dans'
-}
+CORPUS_HUB_STOPWORDS = set()
 
 ALL_STOPWORDS = FRENCH_LEGAL_SUFFIXES | ENGLISH_INDIAN_LEGAL_SUFFIXES | CORPUS_HUB_STOPWORDS
 
@@ -261,40 +253,58 @@ def calculate_competition_macro_f05(preds_dict, gtruth_dict):
 # ---------------------------------------------------------
 # 5. Global Greedy Bipartite Matching with 1-to-1 Target Constraints
 # ---------------------------------------------------------
-def global_greedy_bipartite_matching(candidate_proposals, max_cluster_size=4):
+def rank_based_recall_matching(candidate_proposals, max_claims=15):
     """
-    Enforces the strict 1-to-1 constraint for S2 and S3:
-    Every secondary record from S2/S3 is assigned to at most ONE S1 entity,
-    chosen greedily in descending order of predicted confidence score.
-    Also caps each S1 cluster to <= max_cluster_size to prevent hub explosions.
+    Implements Rank-Based Recall with Top-1 Fallback and Hub-Node Frequency Cap.
+    - Abandons global confidence thresholds.
+    - Top-1 Fallback: For every S1 entity, ALWAYS append its Top-1 highest-scoring
+      candidate from S2 and Top-1 from S3, provided raw confidence > 0.01.
+    - Hub-Node Cap: If an S2/S3 candidate is claimed by > max_claims S1s, drop it.
     """
-    candidate_proposals.sort(key=lambda x: x[0], reverse=True)
-
-    assigned_targets = set()
-    s1_matches = defaultdict(list)
-    s1_s2_count = defaultdict(int)
-    s1_s3_count = defaultdict(int)
-
+    # Group proposals by S1
+    s1_cands = defaultdict(list)
     for score, s1_id, cand_id in candidate_proposals:
-        if cand_id in assigned_targets:
-            continue
-
-        is_s2 = cand_id.startswith("S2-")
-        if is_s2 and s1_s2_count[s1_id] >= 2:
-            continue
-        if (not is_s2) and s1_s3_count[s1_id] >= 2:
-            continue
-        if len(s1_matches[s1_id]) >= max_cluster_size:
-            continue
-
-        s1_matches[s1_id].append(cand_id)
-        assigned_targets.add(cand_id)
-        if is_s2:
-            s1_s2_count[s1_id] += 1
-        else:
-            s1_s3_count[s1_id] += 1
-
-    return s1_matches
+        s1_cands[s1_id].append((score, cand_id))
+        
+    # Sort candidates for each S1 by score descending
+    for s1_id in s1_cands:
+        s1_cands[s1_id].sort(key=lambda x: x[0], reverse=True)
+        
+    proposed = defaultdict(list)
+    hub_counts = Counter()
+    
+    for s1_id, cands in s1_cands.items():
+        s2_count = 0
+        s3_count = 0
+        for score, cand_id in cands:
+            is_s2 = cand_id.startswith("S2-")
+            
+            # Top-1 fallback with 0.01 threshold
+            if is_s2 and s2_count == 0 and score > 0.01:
+                proposed[s1_id].append(cand_id)
+                hub_counts[cand_id] += 1
+                s2_count += 1
+            elif (not is_s2) and s3_count == 0 and score > 0.01:
+                proposed[s1_id].append(cand_id)
+                hub_counts[cand_id] += 1
+                s3_count += 1
+            # Higher threshold for 2nd/3rd matches (e.g. 0.50)
+            elif is_s2 and s2_count < 2 and score >= 0.50:
+                proposed[s1_id].append(cand_id)
+                hub_counts[cand_id] += 1
+                s2_count += 1
+            elif (not is_s2) and s3_count < 2 and score >= 0.50:
+                proposed[s1_id].append(cand_id)
+                hub_counts[cand_id] += 1
+                s3_count += 1
+                
+    final_matches = defaultdict(list)
+    for s1_id, cands in proposed.items():
+        for cand_id in cands:
+            if hub_counts[cand_id] <= max_claims:
+                final_matches[s1_id].append(cand_id)
+                
+    return final_matches
 
 # ---------------------------------------------------------
 # 6. Out-of-Fold Macro F_0.5 Dynamic Threshold Grid Search
@@ -320,7 +330,7 @@ def tune_macro_f05_threshold(val_probs, val_meta, val_gt_map, target_singleton_r
                 if p >= cutoff:
                     proposals.append((float(p), s1_id, cand_ids[idx]))
 
-        preds = global_greedy_bipartite_matching(proposals, max_cluster_size=4)
+        preds = rank_based_recall_matching(proposals, max_claims=15)
         m = calculate_competition_macro_f05(preds, val_gt_map)
 
         # Objective: Macro F0.5 penalized softly for singleton skew
@@ -598,7 +608,7 @@ def main():
 
     # Global Greedy Bipartite Matching on full test candidates
     print("  Applying global bipartite matching with 1-to-1 constraint & cluster caps...")
-    final_matches = global_greedy_bipartite_matching(cand_proposals, max_cluster_size=4)
+    final_matches = rank_based_recall_matching(cand_proposals, max_claims=15)
 
     # Write output files
     out_cand_repo = REPO_OUTPUT / "candidate_pairs.tsv"
