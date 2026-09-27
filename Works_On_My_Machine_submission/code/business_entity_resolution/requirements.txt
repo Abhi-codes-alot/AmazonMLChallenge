@@ -33,3 +33,5 @@ faiss-cpu>=1.7.4
 
 # Optional: Deep Learning / Bi-Encoder Embeddings (install if utilizing transformers)
 sentence-transformers>=2.5.0
+jellyfish>=1.0.0
+optuna>=3.0.0

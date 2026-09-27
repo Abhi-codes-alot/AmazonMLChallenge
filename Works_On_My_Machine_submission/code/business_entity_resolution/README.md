@@ -12,13 +12,10 @@ Works_On_My_Machine_submission/
 ├── code/
 │   └── business_entity_resolution/
 │       ├── src/
-│       │   ├── Pipeline_1_GPU_XGBoost_StarClustering.ipynb    # Pipeline 1: Lexical Metric Space + GPU XGBoost
-│       │   ├── Pipeline_2_MultiStage_Ensemble_LightGBM_Ranker.ipynb # Pipeline 2: Winning Multi-Modal Hybrid Ensemble
-│       │   ├── Amazon_ML.ipynb                           # Master multi-pipeline benchmark notebook
-│       │   └── run_pipeline.py                           # Automated end-to-end Python CLI runner
-│       ├── README.md                                     # Reproduction instructions
-│       └── requirements.txt                              # Pinned Python dependencies
-└── Documentation_template.md                             # Comprehensive technical methodology report
+│       │   └── solution.ipynb                    # Master production end-to-end notebook
+│       ├── README.md                             # Reproduction instructions
+│       └── requirements.txt                      # Pinned Python dependencies
+└── Documentation_template.md                     # Comprehensive technical methodology report
 ```
 
 ## Reproduction Instructions
@@ -29,25 +26,12 @@ Install the pinned dependencies:
 pip install -r requirements.txt
 ```
 
-### 2. Running the Pipelines
-
-#### Option A: Execute Winning Pipeline (Pipeline 2 - Multi-Modal Hybrid Ensemble)
-To execute the winning hybrid pipeline (Phonetic Soundex + Postal PIN Inverted Index + PCA/LDA + LightGBM + Ridge Ranker):
+### 2. Running the Production Pipeline
+To execute the end-to-end production pipeline (Multi-Tier Inverted Indexing with Multi-Token Prefix + Soundex + Postal PIN + Leaf-wise LightGBM + Bipartite Star Disambiguation):
 ```bash
-jupyter nbconvert --to notebook --execute src/Pipeline_2_MultiStage_Ensemble_LightGBM_Ranker.ipynb --output src/Pipeline_2_MultiStage_Ensemble_LightGBM_Ranker.ipynb
+jupyter nbconvert --to notebook --execute src/solution.ipynb --output src/solution.ipynb
 ```
-
-#### Option B: Execute Pipeline 1 (GPU-Accelerated XGBoost)
-To execute the GPU-accelerated XGBoost pipeline:
-```bash
-jupyter nbconvert --to notebook --execute src/Pipeline_1_GPU_XGBoost_StarClustering.ipynb --output src/Pipeline_1_GPU_XGBoost_StarClustering.ipynb
-```
-
-#### Option C: Automated CLI Execution
-To execute via the CLI script:
-```bash
-python3 src/run_pipeline.py
-```
+The notebook automatically checks for `dataset/` locally, and if missing, pulls it directly from Google Drive using `gdown`.
 
 ### 3. Submission Verification
 Run the official competition validation script to verify formatting and ID constraints:
@@ -55,7 +39,7 @@ Run the official competition validation script to verify formatting and ID const
 python3 ../../../student_resource/utils/validate_submission.py \
     --matching ../../output/matching_results.tsv \
     --candidate ../../output/candidate_pairs.tsv \
-    --test-dir /content/dataset/test \
+    --test-dir ../../../dataset/test \
     --check-ids
 ```
 This prints `PASS — no blocking issues found. Safe to submit.` (exit code 0).
